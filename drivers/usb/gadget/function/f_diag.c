@@ -3,7 +3,7 @@
  * Diag Function Device - Route ARM9 and ARM11 DIAG messages
  * between HOST and DEVICE.
  * Copyright (C) 2007 Google, Inc.
- * Copyright (c) 2008-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2008-2020, The Linux Foundation. All rights reserved.
  * Author: Brian Swetland <swetland@google.com>
  */
 #include <linux/init.h>
@@ -22,6 +22,14 @@
 #include <linux/kmemleak.h>
 
 #define MAX_INST_NAME_LEN	40
+
+#ifdef CONFIG_DIAG_OVER_TTY
+#include <linux/usb/tty_diag.h>
+#include <linux/of.h>
+
+static bool tty_mode;
+module_param(tty_mode, bool, S_IRUGO);
+#endif
 
 /* dload specific suppot */
 #define PID_MAGIC_ID		0x71432909
@@ -198,6 +206,26 @@ static inline struct diag_context *func_to_diag(struct usb_function *f)
 	return container_of(f, struct diag_context, function);
 }
 
+#ifdef CONFIG_DIAG_OVER_TTY
+#define BOOTMODE_MAX_LEN 64
+static char bootmode[BOOTMODE_MAX_LEN];
+int __init bootinfo_bootmode_init(char *s)
+{
+	strlcpy(bootmode, s, BOOTMODE_MAX_LEN);
+	return 1;
+}
+__setup("androidboot.mode=", bootinfo_bootmode_init);
+
+static bool factory_cable_present(void)
+{
+	if (!strncmp("mot-factory", bootmode, BOOTMODE_MAX_LEN) ||
+		(!strncmp("factory", bootmode, BOOTMODE_MAX_LEN)))
+		return true;
+	else
+		return false;
+}
+#endif
+
 /* Called with ctxt->lock held; i.e. only use with kref_put_lock() */
 static void diag_context_release(struct kref *kref)
 {
@@ -326,6 +354,18 @@ struct usb_diag_ch *usb_diag_open(const char *name, void *priv,
 	bool connected = false;
 	struct diag_context  *dev;
 
+#ifdef CONFIG_DIAG_OVER_TTY
+	static bool init;
+
+	if (!init) {
+		init = true;
+		tty_mode = factory_cable_present();
+	}
+
+	if (tty_mode)
+		return tty_diag_channel_open(name, priv, notify);
+#endif
+
 	spin_lock_irqsave(&ch_lock, flags);
 	/* Check if we already have a channel with this name */
 	list_for_each_entry(ch, &usb_diag_ch_list, list) {
@@ -378,6 +418,11 @@ void usb_diag_close(struct usb_diag_ch *ch)
 	struct diag_context *dev = NULL;
 	unsigned long flags;
 
+#ifdef CONFIG_DIAG_OVER_TTY
+	if (tty_mode)
+		return tty_diag_channel_close(ch);
+#endif
+
 	spin_lock_irqsave(&ch_lock, flags);
 	ch->priv = NULL;
 	ch->notify = NULL;
@@ -428,6 +473,11 @@ int usb_diag_alloc_req(struct usb_diag_ch *ch, int n_write, int n_read)
 	int i;
 	unsigned long flags;
 
+#ifdef CONFIG_DIAG_OVER_TTY
+	if (tty_mode)
+		return 0;
+#endif
+
 	if (!ctxt)
 		return -ENODEV;
 
@@ -462,7 +512,6 @@ fail:
 }
 EXPORT_SYMBOL(usb_diag_alloc_req);
 #define DWC3_MAX_REQUEST_SIZE (16 * 1024 * 1024)
-#define CI_MAX_REQUEST_SIZE   (16 * 1024)
 /**
  * usb_diag_request_size - Max request size for controller
  * @ch: Channel handler
@@ -472,16 +521,6 @@ EXPORT_SYMBOL(usb_diag_alloc_req);
  */
 int usb_diag_request_size(struct usb_diag_ch *ch)
 {
-	struct diag_context *ctxt = ch->priv_usb;
-	struct usb_composite_dev *cdev;
-
-	if (!ctxt)
-		return 0;
-
-	cdev = ctxt->cdev;
-	if (cdev->gadget->is_chipidea)
-		return CI_MAX_REQUEST_SIZE;
-
 	return DWC3_MAX_REQUEST_SIZE;
 }
 EXPORT_SYMBOL(usb_diag_request_size);
@@ -507,6 +546,11 @@ int usb_diag_read(struct usb_diag_ch *ch, struct diag_request *d_req)
 	struct usb_ep *out;
 	static DEFINE_RATELIMIT_STATE(rl, 10*HZ, 1);
 
+#ifdef CONFIG_DIAG_OVER_TTY
+	if (tty_mode)
+		return tty_diag_channel_read(ch, d_req);
+#endif
+
 	if (!ctxt)
 		return -ENODEV;
 
@@ -521,7 +565,7 @@ int usb_diag_read(struct usb_diag_ch *ch, struct diag_request *d_req)
 
 	if (list_empty(&ctxt->read_pool)) {
 		spin_unlock_irqrestore(&ctxt->lock, flags);
-		pr_err("%s: no requests available\n", __func__);
+		ERROR(ctxt->cdev, "%s: no requests available\n", __func__);
 		return -EAGAIN;
 	}
 
@@ -547,7 +591,8 @@ int usb_diag_read(struct usb_diag_ch *ch, struct diag_request *d_req)
 		list_add_tail(&req->list, &ctxt->read_pool);
 		/* 1 error message for every 10 sec */
 		if (__ratelimit(&rl))
-			pr_err("%s: cannot queue read request\n", __func__);
+			ERROR(ctxt->cdev, "%s: cannot queue read request\n",
+								__func__);
 
 		if (kref_put(&ctxt->kref, diag_context_release))
 			/* diag_context_release called spin_unlock already */
@@ -582,6 +627,11 @@ int usb_diag_write(struct usb_diag_ch *ch, struct diag_request *d_req)
 	struct usb_ep *in;
 	static DEFINE_RATELIMIT_STATE(rl, 10*HZ, 1);
 
+#ifdef CONFIG_DIAG_OVER_TTY
+	if (tty_mode)
+		return tty_diag_channel_write(ch, d_req);
+#endif
+
 	if (!ctxt)
 		return -ENODEV;
 
@@ -596,7 +646,7 @@ int usb_diag_write(struct usb_diag_ch *ch, struct diag_request *d_req)
 
 	if (list_empty(&ctxt->write_pool)) {
 		spin_unlock_irqrestore(&ctxt->lock, flags);
-		pr_err("%s: no requests available\n", __func__);
+		ERROR(ctxt->cdev, "%s: no requests available\n", __func__);
 		return -EAGAIN;
 	}
 
@@ -624,7 +674,8 @@ int usb_diag_write(struct usb_diag_ch *ch, struct diag_request *d_req)
 		ctxt->dpkts_tolaptop_pending--;
 		/* 1 error message for every 10 sec */
 		if (__ratelimit(&rl))
-			pr_err("%s: cannot queue read request\n", __func__);
+			ERROR(ctxt->cdev, "%s: cannot queue read request\n",
+								__func__);
 
 		if (kref_put(&ctxt->kref, diag_context_release))
 			/* diag_context_release called spin_unlock already */

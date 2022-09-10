@@ -722,7 +722,6 @@ struct dwc3_ep_events {
  * @desc: usb_endpoint_descriptor pointer
  * @dwc: pointer to DWC controller
  * @saved_state: ep state saved during hibernation
- * @missed_isoc_packets: counter for missed packets sent
  * @flags: endpoint flags (wedged, stalled, ...)
  * @number: endpoint number (1 - 15)
  * @type: set to bmAttributes & USB_ENDPOINT_XFERTYPE_MASK
@@ -753,7 +752,6 @@ struct dwc3_ep {
 	struct dwc3		*dwc;
 
 	u32			saved_state;
-	u32			missed_isoc_packets;
 	unsigned		flags;
 #define DWC3_EP_ENABLED		BIT(0)
 #define DWC3_EP_STALL		BIT(1)
@@ -1330,6 +1328,7 @@ struct dwc3 {
 
 	u16			imod_interval;
 	u32			xhci_imod_value;
+	bool			xhci_hw_lpm_disable;
 	int			core_id;
 	struct workqueue_struct *dwc_wq;
 	struct work_struct      bh_work;

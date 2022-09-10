@@ -354,6 +354,20 @@ struct mtp_ext_config_desc {
 	struct mtp_ext_config_desc_function    function;
 };
 
+static struct mtp_ext_config_desc mtp_ext_config_desc = {
+	.header = {
+		.dwLength = __constant_cpu_to_le32(sizeof(mtp_ext_config_desc)),
+		.bcdVersion = __constant_cpu_to_le16(0x0100),
+		.wIndex = __constant_cpu_to_le16(4),
+		.bCount = 1,
+	},
+	.function = {
+		.bFirstInterfaceNumber = 0,
+		.bInterfaceCount = 1,
+		.compatibleID = { 'M', 'T', 'P' },
+	},
+};
+
 struct mtp_device_status {
 	__le16	wLength;
 	__le16	wCode;
@@ -376,6 +390,7 @@ struct mtp_instance {
 	struct mtp_dev *dev;
 	char mtp_ext_compat_id[16];
 	struct usb_os_desc mtp_os_desc;
+	bool is_bound;
 };
 
 /* temporary variable used between mtp_open() and mtp_gadget_bind() */
@@ -811,6 +826,11 @@ static void send_file_work(struct work_struct *data)
 	offset = dev->xfer_file_offset;
 	count = dev->xfer_file_length;
 
+	if (count < 0) {
+		dev->xfer_result = -EINVAL;
+		return;
+	}
+
 	mtp_log("(%lld %lld)\n", offset, count);
 
 	if (dev->xfer_send_header) {
@@ -924,6 +944,11 @@ static void receive_file_work(struct work_struct *data)
 	filp = dev->xfer_file;
 	offset = dev->xfer_file_offset;
 	count = dev->xfer_file_length;
+
+	if (count < 0) {
+		dev->xfer_result = -EINVAL;
+		return;
+	}
 
 	mtp_log("(%lld)\n", count);
 	if (!IS_ALIGNED(count, dev->ep_out->maxpacket))
@@ -1314,7 +1339,20 @@ static int mtp_ctrlrequest(struct usb_composite_dev *cdev,
 		mtp_log("vendor request: %d index: %d value: %d length: %d\n",
 			ctrl->bRequest, w_index, w_value, w_length);
 
-		value = -EOPNOTSUPP;
+		if (ctrl->bRequest == 1
+				&& (ctrl->bRequestType & USB_DIR_IN)
+				&& (w_index == 4 || w_index == 5)) {
+			value = (w_length < sizeof(mtp_ext_config_desc) ?
+					w_length : sizeof(mtp_ext_config_desc));
+			memcpy(cdev->req->buf, &mtp_ext_config_desc, value);
+
+			/* update compatibleID if PTP */
+			if (dev->function.fs_descriptors == fs_ptp_descs) {
+				struct mtp_ext_config_desc *d = cdev->req->buf;
+
+				d->function.compatibleID[0] = 'P';
+			}
+		}
 	} else if ((ctrl->bRequestType & USB_TYPE_MASK) == USB_TYPE_CLASS) {
 		mtp_log("class request: %d index: %d value: %d length: %d\n",
 			ctrl->bRequest, w_index, w_value, w_length);
@@ -1384,12 +1422,6 @@ mtp_function_bind(struct usb_configuration *c, struct usb_function *f)
 	dev->cdev = cdev;
 	mtp_log("dev: %pK\n", dev);
 
-	/* ChipIdea controller supports 16K request length for IN endpoint */
-	if (cdev->gadget->is_chipidea && mtp_tx_req_len > 16384) {
-		mtp_log("Truncating Tx Req length to 16K for ChipIdea\n");
-		mtp_tx_req_len = 16384;
-	}
-
 	/* allocate interface ID(s) */
 	id = usb_interface_id(c, f);
 	if (id < 0)
@@ -1443,6 +1475,7 @@ mtp_function_bind(struct usb_configuration *c, struct usb_function *f)
 	}
 
 	fi_mtp->func_inst.f = &dev->function;
+	fi_mtp->is_bound = true;
 	mtp_log("%s speed %s: IN/%s, OUT/%s\n",
 		gadget_is_superspeed(c->cdev->gadget) ? "super" :
 		(gadget_is_dualspeed(c->cdev->gadget) ? "dual" : "full"),
@@ -1477,6 +1510,7 @@ mtp_function_unbind(struct usb_configuration *c, struct usb_function *f)
 	kfree(f->os_desc_table);
 	f->os_desc_n = 0;
 	fi_mtp->func_inst.f = NULL;
+	fi_mtp->is_bound = false;
 }
 
 static int mtp_function_set_alt(struct usb_function *f,
@@ -1793,10 +1827,6 @@ struct usb_function_instance *alloc_inst_mtp_ptp(bool mtp_config)
 		return ERR_PTR(-ENOMEM);
 	fi_mtp->func_inst.set_inst_name = mtp_set_inst_name;
 	fi_mtp->func_inst.free_func_inst = mtp_free_inst;
-	if (mtp_config)
-		memcpy(fi_mtp->mtp_ext_compat_id, "MTP", 3);
-	else
-		memcpy(fi_mtp->mtp_ext_compat_id, "PTP", 3);
 
 	fi_mtp->mtp_os_desc.ext_compat_id = fi_mtp->mtp_ext_compat_id;
 	INIT_LIST_HEAD(&fi_mtp->mtp_os_desc.ext_prop);
@@ -1832,7 +1862,20 @@ static struct usb_function_instance *mtp_alloc_inst(void)
 static int mtp_ctrlreq_configfs(struct usb_function *f,
 				const struct usb_ctrlrequest *ctrl)
 {
-	return mtp_ctrlrequest(f->config->cdev, ctrl);
+	struct mtp_instance *fi_mtp =
+		container_of(f->fi, struct mtp_instance, func_inst);
+
+	if (!f || !f->config) {
+		pr_err("%s: Invalid input for %s function\n",
+			__func__, (f && f->name)? f->name : "unknown");
+
+		return -EINVAL;
+	}
+
+	if (!fi_mtp || (fi_mtp->is_bound == false))
+		return -EOPNOTSUPP;
+	else
+		return mtp_ctrlrequest(f->config->cdev, ctrl);
 }
 
 static void mtp_free(struct usb_function *f)
