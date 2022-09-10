@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2018-2021 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2020 The Linux Foundation. All rights reserved.
  */
 
 #define pr_fmt(fmt)	"QG-K: %s: " fmt, __func__
@@ -36,6 +36,7 @@
 #include "qg-soc.h"
 #include "qg-battery-profile.h"
 #include "qg-defs.h"
+#include <dt-bindings/iio/qcom,spmi-vadc.h>
 
 static int qg_debug_mask;
 
@@ -2122,9 +2123,6 @@ static int qg_psy_set_property(struct power_supply *psy,
 		if (chip->sp)
 			soh_profile_update(chip->sp, chip->soh);
 		break;
-	case POWER_SUPPLY_PROP_CLEAR_SOH:
-		chip->first_profile_load = pval->intval;
-		break;
 	case POWER_SUPPLY_PROP_ESR_ACTUAL:
 		chip->esr_actual = pval->intval;
 		break;
@@ -2215,6 +2213,9 @@ static int qg_psy_get_property(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_COUNTER_SHADOW:
 		pval->intval = chip->qg_charge_counter;
+                break;
+	case POWER_SUPPLY_PROP_CHARGE_NOW:
+		pval->intval = chip->cl->init_cap_uah;
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_FULL:
 		if (!chip->dt.cl_disable && chip->dt.cl_feedback_on)
@@ -2257,9 +2258,6 @@ static int qg_psy_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_SOH:
 		pval->intval = chip->soh;
 		break;
-	case POWER_SUPPLY_PROP_CLEAR_SOH:
-		pval->intval = chip->first_profile_load;
-		break;
 	case POWER_SUPPLY_PROP_CC_SOC:
 		rc = qg_get_cc_soc(chip, &pval->intval);
 		break;
@@ -2289,7 +2287,12 @@ static int qg_psy_get_property(struct power_supply *psy,
 		break;
 	}
 
-	return rc;
+	if (rc < 0) {
+		pr_err("Failed to get property: %d\n", rc);
+		return rc;
+	}
+
+	return 0;
 }
 
 static int qg_property_is_writeable(struct power_supply *psy,
@@ -2302,7 +2305,6 @@ static int qg_property_is_writeable(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_SOH:
 	case POWER_SUPPLY_PROP_FG_RESET:
 	case POWER_SUPPLY_PROP_BATT_AGE_LEVEL:
-	case POWER_SUPPLY_PROP_CLEAR_SOH:
 		return 1;
 	default:
 		break;
@@ -2333,6 +2335,7 @@ static enum power_supply_property qg_psy_props[] = {
 	POWER_SUPPLY_PROP_BATT_PROFILE_VERSION,
 	POWER_SUPPLY_PROP_CYCLE_COUNT,
 	POWER_SUPPLY_PROP_CYCLE_COUNTS,
+	POWER_SUPPLY_PROP_CHARGE_NOW,
 	POWER_SUPPLY_PROP_CHARGE_FULL,
 	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
 	POWER_SUPPLY_PROP_TIME_TO_FULL_AVG,
@@ -2341,7 +2344,6 @@ static enum power_supply_property qg_psy_props[] = {
 	POWER_SUPPLY_PROP_ESR_ACTUAL,
 	POWER_SUPPLY_PROP_ESR_NOMINAL,
 	POWER_SUPPLY_PROP_SOH,
-	POWER_SUPPLY_PROP_CLEAR_SOH,
 	POWER_SUPPLY_PROP_CC_SOC,
 	POWER_SUPPLY_PROP_FG_RESET,
 	POWER_SUPPLY_PROP_VOLTAGE_AVG,
@@ -3138,6 +3140,14 @@ static int qg_load_battery_profile(struct qpnp_qg *chip)
 		}
 	}
 
+        rc = of_property_read_u32(profile_node, "qcom,oem-batt-profile-ver",
+                        &chip->bp.oem_profile_version);
+        if (rc < 0) {
+                        pr_err("Failed to read OEM profile version rc:%d\n", rc);
+                        chip->bp.oem_profile_version = -EINVAL;
+        }
+        qg_dbg(chip, QG_DEBUG_PROFILE, "oem_profile_version=%d\n", chip->bp.oem_profile_version);
+
 	qg_dbg(chip, QG_DEBUG_PROFILE, "profile=%s FV=%duV FCC=%dma\n",
 			chip->bp.batt_type_str, chip->bp.float_volt_uv,
 			chip->bp.fastchg_curr_ma);
@@ -3438,7 +3448,6 @@ static int qg_sanitize_sdam(struct qpnp_qg *chip)
 		rc = qg_sdam_write(SDAM_MAGIC, SDAM_MAGIC_NUMBER);
 		if (!rc)
 			qg_dbg(chip, QG_DEBUG_PON, "First boot. SDAM initilized\n");
-		chip->first_profile_load = true;
 	} else {
 		/* SDAM has invalid value */
 		rc = qg_sdam_clear();
@@ -3446,7 +3455,6 @@ static int qg_sanitize_sdam(struct qpnp_qg *chip)
 			pr_err("SDAM uninitialized, SDAM reset\n");
 			rc = qg_sdam_write(SDAM_MAGIC, SDAM_MAGIC_NUMBER);
 		}
-		chip->first_profile_load = true;
 	}
 
 	if (rc < 0)
@@ -3732,9 +3740,42 @@ static int qg_soh_batt_profile_init(struct qpnp_qg *chip)
 	return rc;
 }
 
+static int qg_profile_version_check(struct qpnp_qg *chip)
+{
+        int rc = 0;
+        u8 sdam_profile_version = 0;
+
+        qg_dbg(chip, QG_DEBUG_SOC, "profile_loaded = %d\n", chip->profile_loaded);
+        qg_dbg(chip, QG_DEBUG_SOC, "oem_profile_version = %d\n", chip->bp.oem_profile_version);
+
+        if (chip->profile_loaded &&
+                chip->bp.oem_profile_version > 0) {
+                rc = qg_sdam_multibyte_read(
+                     QG_SDAM_PROFILE_VERSION_OFFSET,
+                     &sdam_profile_version, 1);
+                qg_dbg(chip, QG_DEBUG_SOC, "sdam_profile_version = %d\n", sdam_profile_version);
+                if (rc < 0)
+                     pr_err("Failed to read SDAM rc=%d\n", rc);
+                else if (chip->bp.oem_profile_version
+                     != sdam_profile_version) {
+                     rc = qg_handle_battery_removal(chip);
+                     if (rc < 0)
+                           pr_err("Failed to clear SDAM rc=%d\n",
+                           rc);
+                     rc = qg_sdam_multibyte_write(
+                           QG_SDAM_PROFILE_VERSION_OFFSET,
+                           (u8 *)&chip->bp.oem_profile_version, 1);
+                     if (rc < 0)
+                           pr_err("Failed to write SDAM rc=%d\n",
+                           rc);
+                 }
+        }
+        return rc;
+}
+
 static int qg_post_init(struct qpnp_qg *chip)
 {
-	int rc = 0;
+        int rc = 0;
 
 	/* disable all IRQs if profile is not loaded */
 	if (!chip->profile_loaded) {
@@ -4376,7 +4417,7 @@ static int qg_parse_dt(struct qpnp_qg *chip)
 	else
 		chip->dt.esr_low_temp_threshold = (int)temp;
 
-	rc = of_property_read_u32(node, "qcom,shutdown-soc-threshold", &temp);
+	rc = of_property_read_u32(node, "qcom,shutdown_soc_threshold", &temp);
 	if (rc < 0)
 		chip->dt.shutdown_soc_threshold = -EINVAL;
 	else
@@ -4706,8 +4747,11 @@ static int qpnp_qg_probe(struct platform_device *pdev)
 		chip->batt_id_chan = NULL;
 		return rc;
 	}
-
+#ifdef CONFIG_BAT_NTC_10K
+	chip->batt_therm_chan = iio_channel_get(&pdev->dev, "batt-therm-ntc-10k");
+#else
 	chip->batt_therm_chan = iio_channel_get(&pdev->dev, "batt-therm");
+#endif
 	if (IS_ERR(chip->batt_therm_chan)) {
 		rc = PTR_ERR(chip->batt_therm_chan);
 		if (rc != -EPROBE_DEFER)
@@ -4717,6 +4761,8 @@ static int qpnp_qg_probe(struct platform_device *pdev)
 	}
 
 	chip->dev = &pdev->dev;
+	qg_debug_mask |= QG_DEBUG_PON | QG_DEBUG_STATUS
+		| QG_DEBUG_IRQ | QG_DEBUG_PM | QG_DEBUG_ESR | QG_DEBUG_SOC;
 	chip->debug_mask = &qg_debug_mask;
 	platform_set_drvdata(pdev, chip);
 	INIT_WORK(&chip->udata_work, process_udata_work);
@@ -4792,6 +4838,13 @@ static int qpnp_qg_probe(struct platform_device *pdev)
 		pr_err("Failed to sanitize SDAM, rc=%d\n", rc);
 		return rc;
 	}
+
+        rc = qg_profile_version_check(chip);
+        qg_dbg(chip, QG_DEBUG_SOC, "qg_profile_version_check\n");
+        if (rc < 0) {
+                pr_err("Failed to claer QG SDAM, rc=%d\n", rc);
+                return rc;
+        }
 
 	rc = qg_soc_init(chip);
 	if (rc < 0) {
