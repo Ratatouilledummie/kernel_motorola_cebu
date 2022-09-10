@@ -3,6 +3,70 @@
 # QCOM Soc drivers
 #
 menu "Qualcomm SoC drivers"
+config MMI_DEVICE_DTBS
+	depends on ARCH_QCOM
+	default n
+	bool "Motorola Mobility Device DTBs"
+	help
+		Only include Motorola device specific DTBs to limit the number that
+		get built during kernel compilation.
+
+config GUAM_DTB
+    depends on ARCH_QCOM
+    default n
+    bool "Guam DTBs"
+    help
+      Only include Guam specific DTBs to limit the number that
+      get built during kernel compilation
+
+config GUAMP_DTB
+    depends on ARCH_QCOM
+    default n
+    bool "Guamp DTBs"
+    help
+      Only include Guamp specific DTBs to limit the number that
+      get built during kernel compilatio
+
+config GUAMNA_DTB
+    depends on ARCH_QCOM
+    default n
+    bool "GuamNA DTBs"
+    help
+      Only include Guam NA specific DTBs to limit the number that
+      get built during kernel compilatio
+
+config BORNEO_DTB
+    depends on ARCH_QCOM
+    default n
+    bool "BorneoNA DTBs"
+    help
+      Only include Borneo NA specific DTBs to limit the number that
+      get built during kernel compilatio
+
+config CEBU_DTB
+    depends on ARCH_QCOM
+    default n
+    bool "Cebu DTBs"
+    help
+      Only include Cebu specific DTBs to limit the number that
+      get built during kernel compilatio
+
+config CAPRI_DTB
+    depends on ARCH_QCOM
+    default n
+    bool "Capri DTBs"
+    help
+      Only include Capri specific DTBs to limit the number that
+      get built during kernel compilation
+
+config CAPRIP_DTB
+    depends on ARCH_QCOM
+    default n
+    bool "Caprip DTBs"
+    help
+      Only include Caprip specific DTBs to limit the number that
+      get built during kernel compilation
+
 config QCOM_COMMAND_DB
 	tristate "Qualcomm Command DB"
 	depends on ARCH_QCOM || COMPILE_TEST
@@ -315,15 +379,6 @@ config QCOM_MEMORY_DUMP_V2
 	  of deadlocks or cpu hangs these dump regions are captured to
 	  give a snapshot of the system at the time of the crash.
 
-config MSM_DEBUG_LAR_UNLOCK
-	bool "MSM Debug LAR Unlock Support"
-	depends on QCOM_MEMORY_DUMP_V2
-	help
-	  This allows unlocking Core Debug lock to allow capture
-	  of upper 32 bits of program counter at the time of
-	  system crash. This is useful in getting correct crash
-	  location.
-
 config QCOM_SMEM_STATE
 	bool
 
@@ -416,7 +471,7 @@ config MSM_REMOTEQDSS
 	  /sys/class/remoteqdss.
 
 config MSM_TZ_SMMU
-	depends on ARCH_MSM8953 || ARCH_QCS405 || ARCH_MSM8917 || ARCH_MSM8937
+	depends on ARCH_MSM8953 || ARCH_QCS405
 	bool "Helper functions for SMMU configuration through TZ"
 	help
 	  Say 'Y' here for targets that need to call into TZ to configure
@@ -815,13 +870,6 @@ config QTI_L2_REUSE
 	  to let the power collapsed cluster's L2 cache usage by the active
 	  cluster cpu. Use sysfs interface to control enabling this feature.
 
-config QCOM_DCC
-	bool "QCOM Data Capture and Compare engine support"
-	help
-	  This option enables driver for Data Capture and Compare engine. DCC
-	  driver provides interface to configure DCC block and read back
-	  captured data from DCC's internal SRAM.
-
 config QTI_RPM_STATS_LOG
 	bool "Qualcomm Technologies RPM Stats Driver"
 	depends on QCOM_RPMH || MSM_RPM_SMD
@@ -979,5 +1027,3 @@ config ICNSS_QMI
 	  handshake messages to WLAN FW, which includes hardware capabilities
 	  and configurations. It also send WLAN on/off control message to FW
 	  over QMI channel.
-
-source "drivers/soc/qcom/wcnss/Kconfig"

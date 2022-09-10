@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2014-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2014-2020, The Linux Foundation. All rights reserved.
  */
 
 #include <linux/kernel.h>
@@ -39,12 +39,9 @@
 #define desc_to_data(d) container_of(d, struct pil_tz_data, desc)
 #define subsys_to_data(d) container_of(d, struct pil_tz_data, subsys_desc)
 
-struct pil_map_fw_info {
-	void *region;
-	unsigned long attrs;
-	phys_addr_t base_addr;
-	struct device *dev;
-};
+static char pil_ssr_reason[MAX_SSR_REASON_LEN];
+static char *ssr_reason = pil_ssr_reason;
+module_param(ssr_reason, charp, S_IRUGO);
 
 /**
  * struct reg_info - regulator info
@@ -606,21 +603,16 @@ static void pil_remove_proxy_vote(struct pil_desc *pil)
 }
 
 static int pil_init_image_trusted(struct pil_desc *pil,
-		const u8 *metadata, size_t size, phys_addr_t mdata_phys,
-		void *region)
+		const u8 *metadata, size_t size)
 {
 	struct pil_tz_data *d = desc_to_data(pil);
 	u32 scm_ret = 0;
 	void *mdata_buf;
+	dma_addr_t mdata_phys;
 	int ret;
+	unsigned long attrs = 0;
+	struct device dev = {0};
 	struct scm_desc desc = {0};
-	struct pil_map_fw_info map_fw_info = {
-		.attrs = pil->attrs,
-		.region = region,
-		.base_addr = mdata_phys,
-		.dev = pil->dev,
-	};
-	void *map_data = pil->map_data ? pil->map_data : &map_fw_info;
 
 	if (d->subsys_desc.no_auth)
 		return 0;
@@ -628,10 +620,15 @@ static int pil_init_image_trusted(struct pil_desc *pil,
 	ret = scm_pas_enable_bw();
 	if (ret)
 		return ret;
+	arch_setup_dma_ops(&dev, 0, 0, NULL, 0);
 
-	mdata_buf = pil->map_fw_mem(mdata_phys, size, map_data);
+	dev.coherent_dma_mask =
+		DMA_BIT_MASK(sizeof(dma_addr_t) * 8);
+	attrs |= DMA_ATTR_STRONGLY_ORDERED;
+	mdata_buf = dma_alloc_attrs(&dev, size, &mdata_phys, GFP_KERNEL,
+					attrs);
 	if (!mdata_buf) {
-		dev_err(pil->dev, "Failed to map memory for metadata.\n");
+		pr_err("scm-pas: Allocation for metadata failed.\n");
 		scm_pas_disable_bw();
 		return -ENOMEM;
 	}
@@ -645,7 +642,7 @@ static int pil_init_image_trusted(struct pil_desc *pil,
 			&desc);
 	scm_ret = desc.ret[0];
 
-	pil->unmap_fw_mem(mdata_buf, size, map_data);
+	dma_free_attrs(&dev, size, mdata_buf, mdata_phys, attrs);
 	scm_pas_disable_bw();
 	if (ret)
 		return ret;
@@ -805,7 +802,7 @@ static struct pil_reset_ops pil_ops_trusted = {
 static void log_failure_reason(const struct pil_tz_data *d)
 {
 	size_t size;
-	char *smem_reason, reason[MAX_SSR_REASON_LEN];
+	char *smem_reason;
 	const char *name = d->subsys_desc.name;
 
 	if (d->smem_id == -1)
@@ -822,8 +819,8 @@ static void log_failure_reason(const struct pil_tz_data *d)
 		return;
 	}
 
-	strlcpy(reason, smem_reason, min(size, (size_t)MAX_SSR_REASON_LEN));
-	pr_err("%s subsystem failure reason: %s.\n", name, reason);
+	strlcpy(pil_ssr_reason, smem_reason, min((size_t)size, (size_t)sizeof(pil_ssr_reason)));
+	pr_err("%s subsystem failure reason: %s.\n", name, pil_ssr_reason);
 }
 
 static int subsys_shutdown(const struct subsys_desc *subsys, bool force_stop)
