@@ -63,10 +63,19 @@ static void sdhci_enable_preset_value(struct sdhci_host *host, bool enable);
 static void sdhci_dump_state(struct sdhci_host *host)
 {
 	struct mmc_host *mmc = host->mmc;
+	char *comm = "none";
+
+	if (mmc->claimer != NULL) {
+		if (mmc->claimer->task != NULL) {
+			if (mmc->claimer->task->comm != NULL)
+				comm = mmc->claimer->task->comm;
+		}
+	}
 
 	pr_info("%s: clk: %d claimer: %s pwr: %d\n",
 		mmc_hostname(mmc), host->clock,
-		mmc->claimer->task->comm, host->pwr);
+		comm, host->pwr);
+
 	pr_info("%s: rpmstatus[pltfm](runtime-suspend:usage_count:disable_depth)(%d:%d:%d)\n",
 	mmc_hostname(mmc), mmc->parent->power.runtime_status,
 		atomic_read(&mmc->parent->power.usage_count),
@@ -3376,14 +3385,6 @@ static void sdhci_data_irq(struct sdhci_host *host, u32 intmask)
 		} else {
 			pr_msg = true;
 		}
-
-		if (host->mmc->ops->get_cd &&
-				!host->mmc->ops->get_cd(host->mmc)) {
-			pr_msg = false;
-			pr_err("%s: Got data error(%d) during card removal\n",
-				mmc_hostname(host->mmc), host->data->error);
-		}
-
 		if (pr_msg && __ratelimit(&host->dbg_dump_rs)) {
 			pr_err("%s: data txfr (0x%08x) error: %d after %lld ms\n",
 			       mmc_hostname(host->mmc), intmask,
